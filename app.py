@@ -1,0 +1,79 @@
+"""hAQT Streamlit workbench — comparative VRAM / speed / accuracy dashboard."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+from src.data_loader import load_benchmark_dataset
+from src.profiler import empty_matrix
+from src.quantizer import ModelSize, Precision, recommended_precisions
+
+ROOT = Path(__file__).resolve().parent
+SAMPLE_PATH = ROOT / "data" / "cve_sample.json"
+
+st.set_page_config(page_title="hAQT Benchmarker", layout="wide")
+st.title("hAQT")
+st.caption("Hardware-Aware Quantization & Security Benchmarker")
+
+with st.sidebar:
+    st.header("Run config")
+    model_choices = st.multiselect(
+        "Models",
+        options=[m.value for m in ModelSize],
+        default=[ModelSize.GEMMA2_2B.value, ModelSize.GEMMA2_9B.value],
+    )
+    vram_gb = st.slider("Assumed GPU VRAM (GB)", 8, 80, 16)
+    data_path = st.text_input("CVE dataset path", str(SAMPLE_PATH))
+    st.info(
+        "Skeleton UI: metrics below are placeholders until a local "
+        "end-to-end GPU run fills `outputs/`."
+    )
+
+records = []
+load_error = None
+try:
+    records = load_benchmark_dataset(data_path, limit=50)
+except Exception as exc:
+    load_error = str(exc)
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Loaded CVEs", len(records))
+col2.metric("With CWE labels", sum(1 for r in records if r.primary_cwe))
+col3.metric("With version mentions", sum(1 for r in records if r.version_mentions))
+
+if load_error:
+    st.error(f"Failed to load dataset: {load_error}")
+elif records:
+    st.subheader("Sample normalized records")
+    st.dataframe(
+        pd.DataFrame([r.to_dict() for r in records]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+sizes = [ModelSize(m) for m in model_choices] or [ModelSize.GEMMA2_2B]
+precisions: list[Precision] = []
+for size in sizes:
+    for p in recommended_precisions(size, float(vram_gb)):
+        if p not in precisions:
+            precisions.append(p)
+
+st.subheader("Benchmark matrix (placeholder)")
+matrix = empty_matrix(sizes, precisions)
+df = pd.DataFrame([m.to_dict() for m in matrix])
+st.dataframe(df, use_container_width=True, hide_index=True)
+
+st.subheader("Charts")
+chart_df = df.copy()
+chart_df["peak_vram_mb"] = pd.to_numeric(chart_df["peak_vram_mb"], errors="coerce")
+chart_df["tokens_per_sec"] = pd.to_numeric(chart_df["tokens_per_sec"], errors="coerce")
+c1, c2 = st.columns(2)
+with c1:
+    st.caption("Peak VRAM (MB)")
+    st.bar_chart(chart_df.set_index("precision")["peak_vram_mb"])
+with c2:
+    st.caption("Throughput (tokens/sec)")
+    st.bar_chart(chart_df.set_index("precision")["tokens_per_sec"])

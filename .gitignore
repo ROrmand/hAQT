@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+.python-version
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (keep only small samples in git)
+data/raw/
+data/nvd/
+data/cve_normalized.jsonl
+data/cve_normalized.json
+*.json.gz
+*.json.zip
+
+# Models / caches
+models/
+.cache/
+huggingface/
+*.bin
+*.safetensors
+*.gguf
+
+# Benchmark outputs
+outputs/
+results/
+*.csv
+!data/cve_sample.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
