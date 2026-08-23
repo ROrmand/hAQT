@@ -19,7 +19,11 @@ _VERSION_RE = re.compile(
     r"(v?\d+(?:\.\d+){1,4}(?:[-_][A-Za-z0-9]+)?)",
     re.IGNORECASE,
 )
-_CPE_VERSION_RE = re.compile(r":([\d]+(?:\.\d+){0,4}(?:[A-Za-z0-9._-]*)?):")
+# CPE 2.3: cpe:2.3:part:vendor:product:version:...
+_CPE_23_VERSION_RE = re.compile(
+    r"cpe:2\.3:[aho]:[^:]+:[^:]+:([^:]+)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -81,12 +85,13 @@ def _extract_versions(description: str, cve: dict[str, Any]) -> tuple[str, ...]:
         mentions.append(match.group(1).lstrip("vV"))
 
     configs = cve.get("configurations") or []
-    # NVD 2.0 configurations can be nested; walk strings for CPE URIs.
     blob = json.dumps(configs)
-    for match in _CPE_VERSION_RE.finditer(blob):
+    for match in _CPE_23_VERSION_RE.finditer(blob):
         ver = match.group(1)
-        if ver not in {"*", "-"} and any(ch.isdigit() for ch in ver):
-            mentions.append(ver)
+        if ver in {"*", "-", ""}:
+            continue
+        if any(ch.isdigit() for ch in ver):
+            mentions.append(ver.lstrip("vV"))
 
     return tuple(dict.fromkeys(mentions))
 

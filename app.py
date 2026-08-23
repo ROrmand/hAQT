@@ -10,6 +10,8 @@ import streamlit as st
 from src.data_loader import load_benchmark_dataset
 from src.profiler import empty_matrix
 from src.quantizer import ModelSize, Precision, recommended_precisions
+from src.scoring import reports_to_flat_metrics, score_predictions
+from src.tasks import build_all_examples
 
 ROOT = Path(__file__).resolve().parent
 SAMPLE_PATH = ROOT / "data" / "cve_sample.json"
@@ -53,6 +55,37 @@ elif records:
         use_container_width=True,
         hide_index=True,
     )
+
+    examples = build_all_examples(records)
+    st.subheader("Task examples")
+    st.caption(f"{len(examples)} prompts (CWE classification + version parsing)")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "task": e.task.value,
+                    "cve_id": e.cve_id,
+                    "gold_cwe": e.gold_cwe,
+                    "gold_versions": ", ".join(e.gold_versions),
+                    "prompt_preview": e.prompt[:160] + ("…" if len(e.prompt) > 160 else ""),
+                }
+                for e in examples
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Offline sanity check of the scorer (no model required).
+    demo_preds = []
+    for e in examples:
+        if e.task.value == "cwe_classification":
+            demo_preds.append(e.gold_cwe or "UNKNOWN")
+        else:
+            demo_preds.append(", ".join(e.gold_versions) if e.gold_versions else "NONE")
+    demo_reports = score_predictions(examples, demo_preds)
+    st.subheader("Scorer smoke test (gold echoed as predictions)")
+    st.json(reports_to_flat_metrics(demo_reports))
 
 sizes = [ModelSize(m) for m in model_choices] or [ModelSize.GEMMA2_2B]
 precisions: list[Precision] = []

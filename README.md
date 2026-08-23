@@ -19,6 +19,8 @@ hAQT/
 ├── scripts/fetch_nvd.py          # download + normalize NVD year feeds
 ├── src/
 │   ├── data_loader.py            # NVD parse + CWE/version label derivation
+│   ├── tasks.py                  # CWE + version prompt builders
+│   ├── scoring.py                # Parse generations + accuracy/F1 metrics
 │   ├── quantizer.py              # BitsAndBytes load configs (2B/9B)
 │   └── profiler.py               # pynvml + timing hooks
 ├── app.py                        # Streamlit dashboard (skeleton)
@@ -66,8 +68,17 @@ From each NVD record we extract:
 - **primary_cwe** / `cwe_ids` from `weaknesses`
 - **version_mentions** from description patterns and CPE URIs
 
-These become gold targets for classification / version-parsing accuracy later.
+These become gold targets for classification / version-parsing accuracy.
+
+## Tasks & scoring
+
+- **CWE classification** — model must reply `CWE-###` (or `UNKNOWN`); scored with exact-match accuracy (+ soft “in gold CWE set”).
+- **Version parsing** — model replies with comma-separated versions (or `NONE`); scored with set precision / recall / F1.
+
+```bash
+python -c "from src.data_loader import load_benchmark_dataset; from src.tasks import build_all_examples; from src.scoring import score_predictions, reports_to_flat_metrics; r=load_benchmark_dataset('data/cve_sample.json'); e=build_all_examples(r); p=[(x.gold_cwe or 'UNKNOWN') if x.task.value=='cwe_classification' else (', '.join(x.gold_versions) or 'NONE') for x in e]; print(reports_to_flat_metrics(score_predictions(e,p)))"
+```
 
 ## Status
 
-Skeleton increment: interfaces, sample data, fetch script, and dashboard shell. Next: task prompts + scoring, then real GPU benchmark runs writing to `outputs/`.
+Task prompts + scoring are in place. Next: GPU benchmark runner writing metrics to `outputs/`, then wire live results into Streamlit.
