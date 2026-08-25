@@ -16,14 +16,17 @@ Pull onto a Google Cloud GPU VM only after:
 ```
 hAQT/
 ├── data/cve_sample.json          # tiny checked-in sample
-├── scripts/fetch_nvd.py          # download + normalize NVD year feeds
+├── scripts/
+│   ├── fetch_nvd.py              # download + normalize NVD year feeds
+│   └── run_benchmark.py          # GPU matrix → outputs/
 ├── src/
 │   ├── data_loader.py            # NVD parse + CWE/version label derivation
 │   ├── tasks.py                  # CWE + version prompt builders
 │   ├── scoring.py                # Parse generations + accuracy/F1 metrics
 │   ├── quantizer.py              # BitsAndBytes load configs (2B/9B)
-│   └── profiler.py               # pynvml + timing hooks
-├── app.py                        # Streamlit dashboard (skeleton)
+│   ├── profiler.py               # pynvml + timing hooks
+│   └── results.py                # save/load outputs/ artifacts
+├── app.py                        # Streamlit dashboard
 ├── demo_run.ipynb                # Colab / Deep Learning VM notebook
 └── requirements.txt
 ```
@@ -40,6 +43,15 @@ python -c "from src.data_loader import load_benchmark_dataset as L; print(L('dat
 
 # Optional: pull a year feed and normalize (gitignored raw files)
 python scripts/fetch_nvd.py --years 2025 --limit 500 --require-cwe
+
+# Dry-run (no GPU): writes placeholder rows under outputs/
+python scripts/run_benchmark.py --dry-run --models 2b
+
+# First real cell on 16GB: Gemma-2 2B INT4 on a tiny batch
+python scripts/run_benchmark.py --limit 4 --models 2b --precisions int4_nf4
+
+# Full local matrix for 2B (FP16/INT8/INT4)
+python scripts/run_benchmark.py --limit 8 --models 2b --vram-gb 16
 
 streamlit run app.py
 ```
@@ -79,6 +91,13 @@ These become gold targets for classification / version-parsing accuracy.
 python -c "from src.data_loader import load_benchmark_dataset; from src.tasks import build_all_examples; from src.scoring import score_predictions, reports_to_flat_metrics; r=load_benchmark_dataset('data/cve_sample.json'); e=build_all_examples(r); p=[(x.gold_cwe or 'UNKNOWN') if x.task.value=='cwe_classification' else (', '.join(x.gold_versions) or 'NONE') for x in e]; print(reports_to_flat_metrics(score_predictions(e,p)))"
 ```
 
+## Benchmark outputs
+
+`scripts/run_benchmark.py` walks the recommended precision matrix, profiles each cell, scores CWE/version generations, and writes:
+
+- `outputs/run_<UTC>.json` / `.csv`
+- `outputs/latest.json` / `latest.csv` (what Streamlit loads)
+
 ## Status
 
-Task prompts + scoring are in place. Next: GPU benchmark runner writing metrics to `outputs/`, then wire live results into Streamlit.
+Data → tasks → scoring → GPU runner → `outputs/` → Streamlit are wired. Next: prove a local 2B INT4 smoke run on the RTX 5070 Ti, then expand the matrix and record cloud demos.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
@@ -23,6 +24,14 @@ class ProfileMetrics:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class ProfileResult:
+    """Metrics plus decoded generations for scoring."""
+
+    metrics: ProfileMetrics
+    generations: list[str] = field(default_factory=list)
 
 
 class GpuMemoryProbe:
@@ -70,6 +79,57 @@ def _cuda_synchronize() -> None:
         pass
 
 
+def release_cuda(*objects: Any) -> None:
+    """Drop model references and empty the CUDA cache between matrix cells."""
+    for obj in objects:
+        try:
+            del obj
+        except Exception:
+            pass
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def _model_device(model: Any) -> Any:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        import torch
+
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _encode_prompt(tokenizer: Any, prompt: str, device: Any) -> dict[str, Any]:
+    """Prefer chat template for instruct checkpoints; fall back to plain encode."""
+    import torch
+
+    if hasattr(tokenizer, "apply_chat_template"):
+        try:
+            encoded = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
+            if isinstance(encoded, torch.Tensor):
+                encoded = {"input_ids": encoded}
+            return {k: v.to(device) for k, v in encoded.items()}
+        except Exception:
+            pass
+
+    encoded = tokenizer(prompt, return_tensors="pt")
+    return {k: v.to(device) for k, v in encoded.items()}
+
+
 def measure_generation(
     generate_fn: Callable[[], tuple[int, float | None]],
     *,
@@ -99,36 +159,9 @@ def measure_generation(
     return total_ms, ttft_ms, num_tokens, peak
 
 
-def profile_prompt_batch(
-    config: LoadConfig,
-    prompts: list[str],
-    *,
-    max_new_tokens: int = 64,
-) -> ProfileMetrics:
-    """
-    Load model at given precision and profile a small prompt batch.
-
-    Skeleton behavior: if CUDA/model weights are unavailable, return a
-    metrics shell with explanatory notes instead of crashing.
-    """
-    notes: list[str] = []
-    try:
-        import torch
-        from src.quantizer import load_model_and_tokenizer
-    except Exception as exc:  # pragma: no cover - env dependent
-        return ProfileMetrics(
-            model_size=config.model_size.value,
-            precision=config.precision.value,
-            peak_vram_mb=None,
-            ttft_ms=None,
-            tokens_per_sec=None,
-            total_latency_ms=None,
-            notes=[f"Import failed: {exc}"],
-        )
-
-    if not torch.cuda.is_available() and config.precision != Precision.FP16:
-        notes.append("CUDA not available; quantized profiling skipped.")
-        return ProfileMetrics(
+def _failed_result(config: LoadConfig, notes: list[str]) -> ProfileResult:
+    return ProfileResult(
+        metrics=ProfileMetrics(
             model_size=config.model_size.value,
             precision=config.precision.value,
             peak_vram_mb=None,
@@ -136,71 +169,115 @@ def profile_prompt_batch(
             tokens_per_sec=None,
             total_latency_ms=None,
             notes=notes,
-        )
+        ),
+        generations=[],
+    )
 
+
+def profile_prompt_batch(
+    config: LoadConfig,
+    prompts: list[str],
+    *,
+    max_new_tokens: int = 64,
+) -> ProfileResult:
+    """
+    Load model at given precision, generate on prompts, profile, then free VRAM.
+
+    If CUDA/model weights are unavailable, return a metrics shell with notes
+    instead of crashing.
+    """
+    notes: list[str] = []
+    try:
+        import torch
+        from src.quantizer import load_model_and_tokenizer
+    except Exception as exc:  # pragma: no cover - env dependent
+        return _failed_result(config, [f"Import failed: {exc}"])
+
+    if not torch.cuda.is_available() and config.precision != Precision.FP16:
+        notes.append("CUDA not available; quantized profiling skipped.")
+        return _failed_result(config, notes)
+
+    model = None
+    tokenizer = None
     try:
         model, tokenizer = load_model_and_tokenizer(config)
     except Exception as exc:
-        return ProfileMetrics(
-            model_size=config.model_size.value,
-            precision=config.precision.value,
-            peak_vram_mb=None,
-            ttft_ms=None,
-            tokens_per_sec=None,
-            total_latency_ms=None,
-            notes=[f"Model load failed: {exc}"],
-        )
+        release_cuda(model, tokenizer)
+        return _failed_result(config, [f"Model load failed: {exc}"])
 
     probe = GpuMemoryProbe()
     total_tokens = 0
     total_ms = 0.0
     first_ttft: float | None = None
-    peak_vram: float | None = None
+    peak_vram: float | None = probe.used_mb()
+    generations: list[str] = []
+    device = _model_device(model)
 
-    for prompt in prompts:
-        encoded = tokenizer(prompt, return_tensors="pt")
-        if torch.cuda.is_available():
-            encoded = {k: v.to(model.device) for k, v in encoded.items()}
+    try:
+        for prompt in prompts:
+            encoded = _encode_prompt(tokenizer, prompt, device)
+            prompt_len = int(encoded["input_ids"].shape[-1])
+            decoded_holder: list[str] = []
 
-        def _gen() -> tuple[int, float | None]:
-            nonlocal first_ttft
-            t_start = time.perf_counter()
-            # Skeleton: single-shot generate; TTFT approximated as full decode
-            # until we add streaming callbacks in a later increment.
-            out = model.generate(
-                **encoded,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-            )
-            elapsed_ms = (time.perf_counter() - t_start) * 1000.0
-            new_tokens = int(out.shape[-1] - encoded["input_ids"].shape[-1])
-            return new_tokens, elapsed_ms
+            def _gen(
+                encoded=encoded,
+                prompt_len=prompt_len,
+                decoded_holder=decoded_holder,
+            ) -> tuple[int, float | None]:
+                t_start = time.perf_counter()
+                # Single-shot generate; TTFT approximated as full decode until
+                # streaming callbacks land in a later increment.
+                with torch.inference_mode():
+                    out = model.generate(
+                        **encoded,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=tokenizer.pad_token_id,
+                    )
+                elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+                new_tokens = int(out.shape[-1] - prompt_len)
+                text = tokenizer.decode(
+                    out[0, prompt_len:],
+                    skip_special_tokens=True,
+                ).strip()
+                decoded_holder.append(text)
+                return new_tokens, elapsed_ms
 
-        batch_ms, ttft_ms, n_tok, vram = measure_generation(_gen, probe=probe)
-        total_ms += batch_ms
-        total_tokens += n_tok
-        if first_ttft is None:
-            first_ttft = ttft_ms
-        if vram is not None:
-            peak_vram = vram if peak_vram is None else max(peak_vram, vram)
+            batch_ms, ttft_ms, n_tok, vram = measure_generation(_gen, probe=probe)
+            generations.append(decoded_holder[0] if decoded_holder else "")
+            total_ms += batch_ms
+            total_tokens += n_tok
+            if first_ttft is None:
+                first_ttft = ttft_ms
+            if vram is not None:
+                peak_vram = vram if peak_vram is None else max(peak_vram, vram)
+    except Exception as exc:
+        notes.append(f"Generation failed: {exc}")
+        generations = []
+    finally:
+        probe.close()
+        release_cuda(model, tokenizer)
 
-    probe.close()
     tps = (total_tokens / (total_ms / 1000.0)) if total_ms > 0 else None
-
-    return ProfileMetrics(
-        model_size=config.model_size.value,
-        precision=config.precision.value,
-        peak_vram_mb=peak_vram,
-        ttft_ms=first_ttft,
-        tokens_per_sec=tps,
-        total_latency_ms=total_ms,
-        num_tokens=total_tokens,
-        notes=notes,
+    return ProfileResult(
+        metrics=ProfileMetrics(
+            model_size=config.model_size.value,
+            precision=config.precision.value,
+            peak_vram_mb=peak_vram,
+            ttft_ms=first_ttft,
+            tokens_per_sec=tps,
+            total_latency_ms=total_ms if total_ms > 0 else None,
+            num_tokens=total_tokens,
+            notes=notes,
+        ),
+        generations=generations,
     )
 
 
-def empty_matrix(model_sizes: list[ModelSize], precisions: list[Precision]) -> list[ProfileMetrics]:
+def empty_matrix(
+    model_sizes: list[ModelSize],
+    precisions: list[Precision],
+) -> list[ProfileMetrics]:
     """Placeholder rows for the dashboard before real runs exist."""
     return [
         ProfileMetrics(
