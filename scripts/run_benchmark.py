@@ -75,7 +75,7 @@ def run_matrix(
 
     for i, config in enumerate(configs, start=1):
         label = f"{config.model_size.value}/{config.precision.value}"
-        print(f"[{i}/{len(configs)}] {label} …", flush=True)
+        print(f"[{i}/{len(configs)}] {label} ...", flush=True)
 
         if dry_run:
             results.append(
@@ -184,7 +184,7 @@ def main() -> int:
         return 1
 
     print(
-        f"Loaded {len(records)} CVEs → {len(examples)} prompts; "
+        f"Loaded {len(records)} CVEs -> {len(examples)} prompts; "
         f"{len(configs)} matrix cells",
         flush=True,
     )

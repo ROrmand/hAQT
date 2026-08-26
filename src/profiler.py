@@ -79,21 +79,19 @@ def _cuda_synchronize() -> None:
         pass
 
 
-def release_cuda(*objects: Any) -> None:
-    """Drop model references and empty the CUDA cache between matrix cells."""
-    for obj in objects:
-        try:
-            del obj
-        except Exception:
-            pass
+def release_cuda() -> None:
+    """Force GC + empty the CUDA cache between matrix cells."""
     gc.collect()
     try:
         import torch
 
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
             if hasattr(torch.cuda, "ipc_collect"):
                 torch.cuda.ipc_collect()
+            gc.collect()
+            torch.cuda.empty_cache()
     except Exception:
         pass
 
@@ -197,15 +195,20 @@ def profile_prompt_batch(
         notes.append("CUDA not available; quantized profiling skipped.")
         return _failed_result(config, notes)
 
+    # Clear leftover allocations from a prior matrix cell before measuring.
+    release_cuda()
+    probe = GpuMemoryProbe()
+    baseline_vram = probe.used_mb()
+
     model = None
     tokenizer = None
     try:
         model, tokenizer = load_model_and_tokenizer(config)
     except Exception as exc:
-        release_cuda(model, tokenizer)
+        release_cuda()
+        probe.close()
         return _failed_result(config, [f"Model load failed: {exc}"])
 
-    probe = GpuMemoryProbe()
     total_tokens = 0
     total_ms = 0.0
     first_ttft: float | None = None
@@ -255,8 +258,23 @@ def profile_prompt_batch(
         notes.append(f"Generation failed: {exc}")
         generations = []
     finally:
+        # Drop caller refs before emptying the cache (del inside a helper is a no-op).
+        try:
+            del model
+        except Exception:
+            pass
+        try:
+            del tokenizer
+        except Exception:
+            pass
+        model = None
+        tokenizer = None
+        release_cuda()
         probe.close()
-        release_cuda(model, tokenizer)
+
+    # Report peak VRAM attributable to this cell (above pre-load baseline).
+    if peak_vram is not None and baseline_vram is not None:
+        peak_vram = max(0.0, peak_vram - baseline_vram)
 
     tps = (total_tokens / (total_ms / 1000.0)) if total_ms > 0 else None
     return ProfileResult(
