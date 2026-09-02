@@ -35,14 +35,14 @@ class ProfileResult:
 
 
 class GpuMemoryProbe:
-    """Thin wrapper around pynvml with safe CPU/no-GPU fallbacks."""
+    """Thin wrapper around NVML (``nvidia-ml-py`` / ``import pynvml``) with safe fallbacks."""
 
     def __init__(self, device_index: int = 0) -> None:
         self.device_index = device_index
         self._handle = None
         self._nvml = None
         try:
-            import pynvml
+            import pynvml  # provided by nvidia-ml-py
 
             pynvml.nvmlInit()
             self._nvml = pynvml

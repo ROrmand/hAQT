@@ -138,16 +138,51 @@ def iter_normalized(records: Iterable[dict[str, Any]]) -> Iterator[CVERecord]:
             yield item
 
 
+def load_normalized_jsonl(path: str | Path) -> list[CVERecord]:
+    """Load records previously written by save_normalized_jsonl."""
+    path = Path(path)
+    out: list[CVERecord] = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            out.append(
+                CVERecord(
+                    cve_id=str(row["cve_id"]),
+                    description=str(row.get("description") or ""),
+                    cwe_ids=tuple(row.get("cwe_ids") or ()),
+                    primary_cwe=row.get("primary_cwe"),
+                    version_mentions=tuple(row.get("version_mentions") or ()),
+                    severity=row.get("severity"),
+                    published=row.get("published"),
+                )
+            )
+    return out
+
+
 def load_benchmark_dataset(
     path: str | Path,
     *,
     require_cwe: bool = False,
     limit: int | None = None,
 ) -> list[CVERecord]:
-    """Load and normalize records for benchmarking."""
-    raw_records = load_nvd_json(path)
+    """Load and normalize records for benchmarking.
+
+    Accepts raw NVD JSON feeds/samples, or normalized ``.jsonl`` from
+    ``scripts/fetch_nvd.py``.
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".jsonl":
+        candidates = load_normalized_jsonl(path)
+    else:
+        candidates = list(iter_normalized(load_nvd_json(path)))
+
     out: list[CVERecord] = []
-    for item in iter_normalized(raw_records):
+    for item in candidates:
+        if not item.description:
+            continue
         if require_cwe and not item.primary_cwe:
             continue
         out.append(item)

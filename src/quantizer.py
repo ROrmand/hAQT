@@ -16,12 +16,17 @@ class Precision(str, Enum):
 class ModelSize(str, Enum):
     GEMMA2_2B = "2b"
     GEMMA2_9B = "9b"
+    NEMOTRON_MINI_4B = "nemotron-mini-4b"
 
 
 MODEL_IDS: dict[ModelSize, str] = {
     ModelSize.GEMMA2_2B: "google/gemma-2-2b-it",
     ModelSize.GEMMA2_9B: "google/gemma-2-9b-it",
+    ModelSize.NEMOTRON_MINI_4B: "nvidia/Nemotron-Mini-4B-Instruct",
 }
+
+# Small local models (~2–4B) share the same VRAM heuristics.
+_LOCAL_SMALL_MODELS = frozenset({ModelSize.GEMMA2_2B, ModelSize.NEMOTRON_MINI_4B})
 
 
 @dataclass(frozen=True)
@@ -38,7 +43,7 @@ class LoadConfig:
 
 def recommended_precisions(model_size: ModelSize, vram_gb: float) -> list[Precision]:
     """Heuristic precision menu for local 16GB vs larger cloud GPUs."""
-    if model_size == ModelSize.GEMMA2_2B:
+    if model_size in _LOCAL_SMALL_MODELS:
         if vram_gb >= 12:
             return [Precision.FP16, Precision.INT8, Precision.INT4_NF4]
         return [Precision.INT8, Precision.INT4_NF4]
@@ -93,7 +98,7 @@ def load_model_and_tokenizer(config: LoadConfig) -> tuple[Any, Any]:
         config.model_id,
         quantization_config=quant_config,
         device_map=config.device_map,
-        torch_dtype=dtype,
+        dtype=dtype,
         trust_remote_code=config.trust_remote_code,
     )
     model.eval()
